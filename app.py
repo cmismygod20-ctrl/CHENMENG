@@ -1,71 +1,100 @@
 import streamlit as st
+from ultralytics import YOLO
+import cv2
+import tempfile
 import numpy as np
-import joblib
-import matplotlib.pyplot as plt
+from PIL import Image
 
-# ===== 모델 불러오기 =====
-model = joblib.load('model.pkl')
+# ===== 标题（中韩双语）=====
+st.title("跌倒检测系统 / 낙상 감지 시스템")
 
-# ===== 페이지 설정 =====
-st.set_page_config(page_title="재활 예측 시스템", layout="centered")
+# ===== 上传选择 =====
+file = st.file_uploader(
+    "上传图片或视频 / 이미지 또는 비디오 업로드",
+    type=["jpg", "png", "mp4", "avi", "mov"]
+)
 
-st.title("🧠 신경 재활 예측 시스템 (Neuro Rehabilitation Prediction)")
-st.write("환자의 데이터를 입력하면 재활 기간을 예측합니다.")
+# ===== 加载模型（只加载一次）=====
+@st.cache_resource
+def load_model():
+    return YOLO("yolov8n-pose.pt")
 
-# ===== 입력 =====
-st.header("📋 환자 정보 입력")
+model = load_model()
 
-muscle = st.slider("근력 (muscle_strength)", 0, 100, 50)
-balance = st.slider("균형 능력 (balance_score)", 0, 100, 50)
-gait = st.slider("보행 속도 (gait_speed)", 0.0, 2.0, 1.0)
-age = st.slider("나이 (age)", 20, 90, 60)
-falls = st.selectbox("낙상 이력 여부 (history_falls)", [0, 1])
+# ===== 判断函数（核心分析逻辑）=====
+def detect_fall_from_keypoints(kpts):
+    for person in kpts:
+        x = person[:, 0]
+        y = person[:, 1]
 
-# ===== 파일 업로드 =====
-st.header("📂 보행 이미지 / 영상 업로드 (선택)")
-uploaded_file = st.file_uploader("파일을 업로드하세요")
+        width = max(x) - min(x)
+        height = max(y) - min(y)
 
-if uploaded_file:
-    st.image(uploaded_file, caption="업로드된 이미지", use_column_width=True)
-    st.success("✅ 파일 업로드 완료 (분석 시뮬레이션)")
+        if width > height:
+            return True
+    return False
 
-# ===== 예측 =====
-if st.button("🚀 예측 시작"):
+# ===== 处理图片 =====
+def process_image(image):
+    results = model(image)
 
-    X = np.array([[muscle, balance, gait, age, falls]])
-    pred = model.predict(X)
+    if results[0].keypoints is not None:
+        kpts = results[0].keypoints.xy.cpu().numpy()
+        return detect_fall_from_keypoints(kpts)
+    return False
 
-    st.success(f"📊 예상 재활 기간: {pred[0]:.2f} 일")
+# ===== 处理视频 =====
+def process_video(video_path):
+    cap = cv2.VideoCapture(video_path)
+    fall_detected = False
 
-    # ===== 특성 중요도 =====
-    st.subheader("📈 영향 요인 분석 (Feature Importance)")
+    while cap.isOpened():
+        ret, frame = cap.read()
+        if not ret:
+            break
 
-    features = ["근력", "균형", "보행 속도", "나이", "낙상 이력"]
-    importance = [0.26, 0.25, 0.24, 0.18, 0.05]
+        results = model(frame)
 
-    fig, ax = plt.subplots()
-    ax.barh(features, importance)
-    ax.set_xlabel("중요도")
-    ax.set_title("재활 결과에 영향을 미치는 요인")
+        if results[0].keypoints is not None:
+            kpts = results[0].keypoints.xy.cpu().numpy()
 
-    st.pyplot(fig)
+            if detect_fall_from_keypoints(kpts):
+                fall_detected = True
+                break
 
-    st.success("✅ 분석 완료!")
+    cap.release()
+    return fall_detected
 
-    # ===== 보고서 다운로드 =====
-    report_text = f"""
-재활 예측 결과 보고서
+# ===== 主逻辑 =====
+if file is not None:
 
-예상 재활 기간: {pred[0]:.2f} 일
+    file_type = file.type
 
-입력 데이터:
-근력: {muscle}
-균형: {balance}
-보행 속도: {gait}
-나이: {age}
-낙상 이력: {falls}
+    st.info("分析中... / 분석 중...")
 
-분석이 성공적으로 완료되었습니다.
-"""
+    # 👉 图片
+    if "image" in file_type:
+        image = Image.open(file)
+        st.image(image, caption="上传图片 / 업로드된 이미지")
 
-    st.download_button("📄 보고서 다운로드", report_text, file_name="rehab_report.txt")
+        fall = process_image(image)
+
+    # 👉 视频
+    elif "video" in file_type:
+        tfile = tempfile.NamedTemporaryFile(delete=False)
+        tfile.write(file.read())
+
+        st.video(file)
+
+        fall = process_video(tfile.name)
+
+    else:
+        st.warning("不支持的文件类型 / 지원하지 않는 형식")
+        fall = None
+
+    # ===== 输出结果 =====
+    if fall is not None:
+        if fall:
+            st.error("⚠️ 检测到跌倒！ / 낙상이 감지되었습니다!")
+        else:
+            st.success("✅ 未检测到跌倒 / 정상 상태입니다")
